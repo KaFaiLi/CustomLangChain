@@ -1,0 +1,33 @@
+azure:
+  endpoint: ""
+  deployment: "gpt-4.1-nano"  # Default deployment (fallback if none specified)
+  api_version: ""
+  auth_mode: "api_key"
+  api_key: ""
+
+# Pricing per model (EUR per 1000 tokens)
+# Add all your deployed models here
+pricing:
+  # Standard chat models
+  gpt-4.1-nano:
+    input: 0.0001
+    output: 0.0004
+  
+  # Thinking/reasoning models
+  gpt-5-nano:
+    input: 0.01
+    output: 0.03
+  
+  # Embedding models (output is 0 - embeddings have no output tokens)
+  text-embedding-3-small:
+    input: 0.00002
+    output: 0.0
+  
+  text-embedding-3-large:
+    input: 0.00013
+    output: 0.0
+  
+  text-embedding-ada-002:
+    input: 0.0001
+    output: 0.0
+
