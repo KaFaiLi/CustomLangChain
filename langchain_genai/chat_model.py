@@ -7,8 +7,9 @@ exposing the full LangChain ``BaseChatModel`` interface.
 
 from __future__ import annotations
 
+import warnings
 from operator import itemgetter
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -16,6 +17,7 @@ from langchain_core.callbacks import (
 )
 from langchain_core.language_models import BaseChatModel, LangSmithParams
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.output_parsers.openai_tools import (
     JsonOutputKeyToolsParser,
     PydanticToolsParser,
@@ -224,31 +226,160 @@ class GenAIChatModel(BaseChatModel):
 
     def with_structured_output(
         self,
-        schema: type | dict[str, Any],
+        schema: Optional[type | dict[str, Any]] = None,
         *,
         include_raw: bool = False,
+        method: Literal["function_calling", "json_schema", "json_mode"] = "function_calling",
+        strict: Optional[bool] = None,
         **kwargs: Any,
     ) -> Runnable:
         """Return a Runnable that parses model output into *schema*.
 
-        Uses the ``function_calling`` method: binds the schema as a tool
-        and attaches an output parser.
+        Supports three methods for structured output:
+        - ``function_calling``: Uses tool calling (most compatible)
+        - ``json_schema``: Alias for function_calling (compatibility)
+        - ``json_mode``: Returns JSON without enforcing schema
 
         Args:
             schema: A Pydantic class or JSON-schema dict describing the
-                desired output structure.
+                desired output structure. Required for ``function_calling``
+                and ``json_schema`` methods. Optional for ``json_mode``.
             include_raw: If ``True``, return a dict with ``raw``,
-                ``parsed``, and ``parsing_error`` keys.
-            **kwargs: Extra keyword arguments forwarded to ``bind``.
+                ``parsed``, and ``parsing_error`` keys. Default: ``False``.
+            method: The method to use for structured output:
+                - ``"function_calling"`` (default): Binds schema as a tool
+                - ``"json_schema"``: Alias for function_calling
+                - ``"json_mode"``: Returns valid JSON (schema not enforced)
+            strict: Enable strict schema validation. When ``True``, adds
+                metadata for potential future enforcement. When ``False`` or
+                ``None``, no strict validation. Default: ``None``.
+            **kwargs: Extra keyword arguments forwarded to ``bind`` or
+                model invocation (e.g., ``temperature``, ``max_tokens``).
 
         Returns:
             A ``Runnable`` producing instances of *schema* (or a dict
             when *include_raw* is ``True``).
+
+        Raises:
+            ValueError: If schema is required but not provided, or if
+                method/strict combination is invalid.
+
+        Examples:
+            Basic Pydantic schema:
+
+            .. code-block:: python
+
+                from pydantic import BaseModel
+
+                class Person(BaseModel):
+                    name: str
+                    age: int
+
+                structured = model.with_structured_output(Person)
+                result = structured.invoke("John is 30 years old")
+                # result is a Person instance
+
+            With include_raw for error handling:
+
+            .. code-block:: python
+
+                structured = model.with_structured_output(
+                    Person,
+                    include_raw=True
+                )
+                result = structured.invoke("...")
+                if result["parsing_error"]:
+                    print(f"Error: {result['parsing_error']}")
+                else:
+                    person = result["parsed"]
+
+            Using json_mode for flexible JSON:
+
+            .. code-block:: python
+
+                structured = model.with_structured_output(
+                    method="json_mode"
+                )
+                result = structured.invoke(
+                    "Return JSON with name and age fields"
+                )
+                # result is a dict (schema not enforced)
         """
+        # Validate method parameter
+        if method not in ("function_calling", "json_schema", "json_mode"):
+            raise ValueError(
+                f"Invalid method '{method}'. Must be one of: "
+                f"'function_calling', 'json_schema', 'json_mode'"
+            )
+
+        # Validate schema requirement
+        if method in ("function_calling", "json_schema") and schema is None:
+            raise ValueError(
+                f"schema is required when method='{method}'. "
+                f"Either provide a schema or use method='json_mode'."
+            )
+
+        # Validate strict parameter compatibility
+        if strict is True and method == "json_mode":
+            raise ValueError(
+                "strict=True is not compatible with method='json_mode'. "
+                "Use 'function_calling' or 'json_schema' for strict validation."
+            )
+
+        # Add LangSmith tracing metadata
+        ls_metadata = {
+            "kwargs": {"method": method, "strict": strict, "include_raw": include_raw},
+            "schema": schema,
+        }
+        
+        # Route to appropriate implementation
+        if method == "json_mode":
+            return self._with_structured_output_json_mode(
+                schema=schema,
+                include_raw=include_raw,
+                ls_metadata=ls_metadata,
+                **kwargs,
+            )
+        else:
+            # Both 'function_calling' and 'json_schema' use the same implementation
+            return self._with_structured_output_function_calling(
+                schema=schema,  # type: ignore[arg-type]
+                include_raw=include_raw,
+                strict=strict,
+                ls_metadata=ls_metadata,
+                **kwargs,
+            )
+
+    def _with_structured_output_function_calling(
+        self,
+        schema: type | dict[str, Any],
+        *,
+        include_raw: bool,
+        strict: Optional[bool],
+        ls_metadata: dict[str, Any],
+        **kwargs: Any,
+    ) -> Runnable:
+        """Implementation of function_calling/json_schema method."""
+        # Issue warning about strict mode
+        if strict is True:
+            warnings.warn(
+                "strict=True is accepted but not fully enforced in GenAIChatModel. "
+                "The schema will be bound as a tool, but strict validation depends "
+                "on your backend API's capabilities. For guaranteed strict mode, "
+                "ensure your GenAI API supports OpenAI-compatible strict schemas.",
+                UserWarning,
+                stacklevel=3,
+            )
+        
         tool_def = convert_to_openai_tool(schema)
         tool_name = tool_def["function"]["name"]
 
-        llm = self.bind_tools([schema], tool_choice=tool_name, **kwargs)
+        # Bind tools with LangSmith metadata
+        bind_kwargs = {
+            **kwargs,
+            "ls_structured_output_format": ls_metadata,
+        }
+        llm = self.bind_tools([schema], tool_choice=tool_name, **bind_kwargs)
 
         is_pydantic = isinstance(schema, type) and _is_pydantic_class(schema)
 
@@ -261,6 +392,61 @@ class GenAIChatModel(BaseChatModel):
             output_parser = JsonOutputKeyToolsParser(
                 key_name=tool_name, first_tool_only=True
             )
+
+        if include_raw:
+            parser_assign = RunnablePassthrough.assign(
+                parsed=itemgetter("raw") | output_parser,
+                parsing_error=lambda _: None,
+            )
+            parser_none = RunnablePassthrough.assign(parsed=lambda _: None)
+            parser_with_fallback = parser_assign.with_fallbacks(
+                [parser_none], exception_key="parsing_error"
+            )
+            return RunnableMap(raw=llm) | parser_with_fallback
+
+        return llm | output_parser
+
+    def _with_structured_output_json_mode(
+        self,
+        schema: Optional[type | dict[str, Any]],
+        *,
+        include_raw: bool,
+        ls_metadata: dict[str, Any],
+        **kwargs: Any,
+    ) -> Runnable:
+        """Implementation of json_mode method.
+        
+        Returns valid JSON but does NOT enforce the schema.
+        The schema (if provided) is used only for parsing hints.
+        """
+        # Issue informational warning
+        warnings.warn(
+            "json_mode returns valid JSON but does NOT enforce the schema. "
+            "For guaranteed schema compliance, use method='function_calling'. "
+            "You must include schema instructions in your prompt.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+        # JSON mode: add response_format to model kwargs
+        # Note: This requires your GenAI backend to support json_object response format
+        bind_kwargs = {
+            **kwargs,
+            "response_format": {"type": "json_object"},
+            "ls_structured_output_format": ls_metadata,
+        }
+        llm = self.bind(**bind_kwargs)
+
+        # Select parser based on schema type
+        if schema is None:
+            # No schema: just parse JSON from content
+            output_parser: Runnable = JsonOutputParser()
+        elif isinstance(schema, type) and _is_pydantic_class(schema):
+            # Pydantic schema: parse and validate
+            output_parser = PydanticOutputParser(pydantic_object=schema)  # type: ignore[arg-type]
+        else:
+            # Dict schema: parse JSON
+            output_parser = JsonOutputParser()
 
         if include_raw:
             parser_assign = RunnablePassthrough.assign(
