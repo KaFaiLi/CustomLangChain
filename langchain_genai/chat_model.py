@@ -204,7 +204,7 @@ class GenAIChatModel(BaseChatModel):
             elif "name" in t:
                 tool_names.append(t["name"])
 
-        if tool_choice:
+        if tool_choice is not None:
             if isinstance(tool_choice, str):
                 if tool_choice in tool_names:
                     tool_choice = {
@@ -215,7 +215,7 @@ class GenAIChatModel(BaseChatModel):
                     tool_choice = "required"
                 # "auto", "none", "required" pass through as-is.
             elif isinstance(tool_choice, bool):
-                tool_choice = "required"
+                tool_choice = "required" if tool_choice else "none"
             kwargs["tool_choice"] = tool_choice
 
         return super().bind(tools=formatted_tools, **kwargs)
@@ -379,7 +379,7 @@ class GenAIChatModel(BaseChatModel):
             **kwargs,
             "ls_structured_output_format": ls_metadata,
         }
-        llm = self.bind_tools([schema], tool_choice=tool_name, **bind_kwargs)
+        llm = self.bind_tools([schema], tool_choice="any", **bind_kwargs)
 
         is_pydantic = isinstance(schema, type) and _is_pydantic_class(schema)
 

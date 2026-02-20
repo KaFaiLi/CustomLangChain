@@ -208,6 +208,14 @@ class TestBindTools:
         bound = chat_model.bind_tools([my_tool], tool_choice=True)
         assert bound.kwargs["tool_choice"] == "required"
 
+    def test_tool_choice_bool_false(self, chat_model: GenAIChatModel) -> None:
+        def my_tool(x: str) -> str:
+            """A tool."""
+            return x
+
+        bound = chat_model.bind_tools([my_tool], tool_choice=False)
+        assert bound.kwargs["tool_choice"] == "none"
+
     def test_tool_choice_any(self, chat_model: GenAIChatModel) -> None:
         def my_tool(x: str) -> str:
             """A tool."""
