@@ -374,12 +374,14 @@ class GenAIChatModel(BaseChatModel):
         tool_def = convert_to_openai_tool(schema)
         tool_name = tool_def["function"]["name"]
 
+        tool_choice = kwargs.pop("tool_choice", "auto")
+
         # Bind tools with LangSmith metadata
         bind_kwargs = {
             **kwargs,
             "ls_structured_output_format": ls_metadata,
         }
-        llm = self.bind_tools([schema], tool_choice="any", **bind_kwargs)
+        llm = self.bind_tools([schema], tool_choice=tool_choice, **bind_kwargs)
 
         is_pydantic = isinstance(schema, type) and _is_pydantic_class(schema)
 
